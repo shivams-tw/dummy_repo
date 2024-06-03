@@ -4,7 +4,7 @@ import re
 import subprocess
 import sys
 
-class ingestion_files:
+class dataIngestionUtil:
 
     def __init__(self):
         self.data_sharing_zone_layer_bucket = 'test-edp-data-sharing-zone'
@@ -14,6 +14,7 @@ class ingestion_files:
         self.bronze_bucket_ingestion_folder = "customer/cdm/customer_identity/"
         self.AWS_PROFILE="default"  # Optional: Specify the AWS profile to use, if not default
         self.current_date = current_date = datetime.date.today().strftime("%Y%m%d")
+        self.ingestion_file_pattern = r'^customer*'
         self.s3 = boto3.client('s3')
 
     def check_bucket_existence(self,bucket_name):
@@ -79,7 +80,22 @@ class ingestion_files:
         
         except Exception as e:
             print(f'Failed listing files in {bucket_name}/{folder_prefix}/{file_pattern} S3 folder path with error',e)
-            sys.exit(1)         
+            sys.exit(1)  
+
+    def find_delta_files_to_be_ingested(self,folder_ingestion_date,file_pattern,source_bucket_files_to_ingest):
+        
+            target_folder = self.bronze_bucket_ingestion_folder + f'{folder_ingestion_date.year}/{str(folder_ingestion_date.month).zfill(2)}/{str(folder_ingestion_date.day).zfill(2)}/'
+            print('\nBronze Layer Bucket folder where files would be ingested',target_folder)
+            
+            target_bucket_files_ingested = self.list_files_with_pattern(self.bronze_layer_bucket, target_folder, file_pattern)
+
+            source_bucket_files_to_ingest_path_fix = [file_path.split('/')[-1] for file_path in source_bucket_files_to_ingest]
+            target_bucket_files_to_ingest_path_fix = [file_path.split('/')[-1] for file_path in target_bucket_files_ingested]
+
+            source_files_not_ingested = [item for item in source_bucket_files_to_ingest_path_fix if item not in target_bucket_files_to_ingest_path_fix]
+
+            return target_bucket_files_ingested,target_folder,source_files_not_ingested
+
     
     def ingesting_files_dataSharingZone_to_bronze_layer(self):
 
@@ -113,7 +129,7 @@ class ingestion_files:
                         print(f'{source_folder} to be ingested from Data Sharing Zone to Bronze bucket\n')
 
                         #get the files to be processed of specific pattern
-                        file_pattern = r'^customer*'
+                        file_pattern = self.ingestion_file_pattern
                         folder_ingestion_date = datetime.datetime.strptime(source_folder.split('/')[-1], "%Y%m%d")
                         source_folder = source_folder + '/'
 
@@ -122,23 +138,16 @@ class ingestion_files:
                             print('Source bucket files to be ingested',source_bucket_files_to_ingest)
 
                             #get the files available in bronze layer (Ideally there won't be any folder/file present because we have to copy the files into bronze layer)
-                            target_folder = self.bronze_bucket_ingestion_folder + f'{folder_ingestion_date.year}/{str(folder_ingestion_date.month).zfill(2)}/{str(folder_ingestion_date.day).zfill(2)}/'
-                            print('\nBronze Layer Bucket folder where files would be ingested',target_folder)
-                            target_bucket_files_ingested = self.list_files_with_pattern(self.bronze_layer_bucket, target_folder, file_pattern)
+                            target_bucket_files_ingested,target_folder,source_files_not_ingested = self.find_delta_files_to_be_ingested(folder_ingestion_date,file_pattern,source_bucket_files_to_ingest)
+                            
                             if target_bucket_files_ingested:
-                                print("Some Files are already ingested in bronze layer bucket folder")
-                                print("Ingesting the files that are not present in the bronze layer bucket folder")
-                                source_bucket_files_to_ingest_path_fix = [file_path.split('/')[-1] for file_path in source_bucket_files_to_ingest]
-                                target_bucket_files_to_ingest_path_fix = [file_path.split('/')[-1] for file_path in target_bucket_files_ingested]
-
-                                source_files_not_ingested = [item for item in source_bucket_files_to_ingest_path_fix if item not in target_bucket_files_to_ingest_path_fix]
 
                                 if len(source_files_not_ingested) > 0:
+                                    print("Ingesting the files that are not present in the bronze layer bucket folder")
 
                                     for files_to_be_ingested in source_files_not_ingested:
-
+                                        print('files_to_be_ingested',files_to_be_ingested)
                                         command = f"aws s3 cp s3://{self.data_sharing_zone_layer_bucket}/{source_folder}{files_to_be_ingested} s3://{self.bronze_layer_bucket}/{target_folder}"
-
                                         # Execute the command using subprocess
                                         process = subprocess.Popen(command.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                                         output, error = process.communicate()       
@@ -157,17 +166,18 @@ class ingestion_files:
 
                                 #copy all the ingestion files from data sharing zone to bronze layer
                                 # Construct the AWS CLI command
-                                command = f"aws s3 cp s3://{self.data_sharing_zone_layer_bucket}/{source_folder} s3://{self.bronze_layer_bucket}/{target_folder} --recursive"
+                                for files_to_be_ingested in source_files_not_ingested:
+                                    print('files_to_be_ingested',files_to_be_ingested)
+                                    command = f"aws s3 cp s3://{self.data_sharing_zone_layer_bucket}/{source_folder}{files_to_be_ingested} s3://{self.bronze_layer_bucket}/{target_folder}"
+                                    # Execute the command using subprocess
+                                    process = subprocess.Popen(command.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                    output, error = process.communicate()
 
-                                # Execute the command using subprocess
-                                process = subprocess.Popen(command.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                                output, error = process.communicate()
-
-                                if error:
-                                    print("Error copying files:", error.decode())
-                                    sys.exit(1)
-                                else:
-                                    print("\n Files Ingestion from Data Sharing Zone to Bronze Layer is successfully! \n")
+                                    if error:
+                                        print("Error copying files:", error.decode())
+                                        sys.exit(1)
+                                    else:
+                                        print("\n Files Ingestion from Data Sharing Zone to Bronze Layer is successfully! \n")
                         
                         else:
                             print('No Source bucket files found to be ingested')
@@ -182,8 +192,6 @@ class ingestion_files:
         except Exception as e:
             print('Failed with error',e)
             sys.exit(1)
-
-        
 
     def archiving_files_dataSharingZone_to_archive_folder(self):
 
@@ -200,10 +208,10 @@ class ingestion_files:
                 if folder_to_be_ingested:
 
                     for source_folder in folder_to_be_ingested:
-                        print(f'{source_folder} to be archived from Data Sharing Zone to Archive Foldert\n')
+                        print(f'{source_folder} to be archived from Data Sharing Zone to Archive Folder \n')
 
                         #get the files to be archived
-                        file_pattern = r'^customer*'
+                        file_pattern = self.ingestion_file_pattern
                         folder_ingestion_date = datetime.datetime.strptime(source_folder.split('/')[-1], "%Y%m%d")
                         source_folder = source_folder + '/'
 
@@ -213,15 +221,9 @@ class ingestion_files:
                             print('\n')
 
                             #get the files from bronze layer to check if the source files are already ingested so that they can be moved to archive folder
-                            target_folder = self.bronze_bucket_ingestion_folder + f'{folder_ingestion_date.year}/{str(folder_ingestion_date.month).zfill(2)}/{str(folder_ingestion_date.day).zfill(2)}/'
-                            print('\nBronze Layer Bucket folder where files are already ingested',target_folder)
-                            target_bucket_files_ingested = self.list_files_with_pattern(self.bronze_layer_bucket, target_folder, file_pattern)
+                            target_bucket_files_ingested,target_folder,source_files_not_ingested = self.find_delta_files_to_be_ingested(folder_ingestion_date,file_pattern,source_bucket_files_ingested)
+
                             if target_bucket_files_ingested:
-
-                                source_bucket_files_ingested_path_fix = [file_path.split('/')[-1] for file_path in source_bucket_files_ingested]
-                                target_bucket_files_ingested_path_fix = [file_path.split('/')[-1] for file_path in target_bucket_files_ingested]
-
-                                source_files_not_ingested = [item for item in source_bucket_files_ingested_path_fix if item not in target_bucket_files_ingested_path_fix]
 
                                 if len(source_files_not_ingested) == 0:
 
@@ -252,7 +254,7 @@ class ingestion_files:
             print('Failed with error',e)
 
 
-obj = ingestion_files()
+obj = dataIngestionUtil()
 
 obj.ingesting_files_dataSharingZone_to_bronze_layer()
 obj.archiving_files_dataSharingZone_to_archive_folder()
